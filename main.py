@@ -19,19 +19,11 @@ from constants import device, compute_type, security, MAX_THREADS
 from responses import SUCCESSFUL_RESPONSE, BAD_REQUEST_RESPONSE
 from responses import VALIDATION_ERROR_RESPONSE, INTERNAL_SERVER_ERROR_RESPONSE
 
-# Add these imports at the top of your main.py
-from pyannote.audio import Pipeline
-from dotenv import load_dotenv
-
 # Logging configuration
 from logging_config import get_logger
 logger = get_logger()
 
 app = FastAPI()
-
-# Add this after other imports and before initializing FastAPI
-load_dotenv()
-
 
 origins = ["*"]
 
@@ -47,31 +39,32 @@ app.add_middleware(
 from utils import authenticate_user
 from utils import process_file, validate_parameters
 
-# Add this below your existing global variables and constants
-diarization_pipeline = None
 
-# Add this after initializing FastAPI and setting up middleware
+from pyannote.audio import Model, Inference
+from pyannote.core import Segment
 
+def diarize_audio_with_pyannote(audio_file_path):
+    """
+    Perform speaker diarization on the audio file using pyannote-audio and return speaker-labeled segments.
+    """
+    # Load the pre-trained model for speaker segmentation
+    model = Model.from_pretrained("pyannote/segmentation")
+    inference = Inference(model)
 
-def initialize_diarization_pipeline():
-    global diarization_pipeline
-    hf_auth_token = os.getenv("HF_AUTH_TOKEN")
-    if not hf_auth_token:
-        logger.error("Hugging Face Auth Token not found. Please set it in the .env file.")
-        raise ValueError("Hugging Face Auth Token not found. Please set it in the .env file.")
-    
-    try:
-        diarization_pipeline = Pipeline.from_pretrained(
-            'pyannote/segmentation'
-        )
-        logger.info("Diarization pipeline loaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to load diarization pipeline: {str(e)}")
-        raise e
+    # Perform inference on the entire file
+    diarization_results = inference(audio_file_path)
 
+    # Extract speaker-labeled segments
+    speaker_segments = []
+    for turn, _, speaker in diarization_results.itertracks(yield_label=True):
+        speaker_segments.append({
+            'speaker': speaker,
+            'start': turn.start,
+            'end': turn.end
+        })
 
+    return speaker_segments
 
-initialize_diarization_pipeline()
 
 
 # Routes
@@ -137,21 +130,6 @@ def home():
             </li>
         </ul>
     """)
-# Modify the existing transcribe_audio function as follows
-
-def diarize_audio(file_path):
-    global diarization_pipeline
-    if diarization_pipeline is None:
-        logger.error("Diarization pipeline is not initialized.")
-        raise ValueError("Diarization pipeline is not initialized.")
-    
-    try:
-        diarization = diarization_pipeline(file_path)
-        return diarization
-    except Exception as e:
-        logger.error(f"Diarization failed: {str(e)}")
-        raise e
-
 @app.post('/v1/transcriptions',
           responses={
               200: SUCCESSFUL_RESPONSE,
@@ -177,8 +155,21 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = []
         for f in file:
-            future = executor.submit(asyncio.run, process_file(f, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms))
-            futures.append(future)
+            # Save the file to disk
+            file_path = f"./{f.filename}"
+            with open(file_path, "wb") as buffer:
+                buffer.write(await f.read())
+            
+            # Call the new diarization function to get speaker segments
+            speaker_segments = diarize_audio_with_pyannote(file_path)
+            
+            # Process each speaker segment for transcription
+            for segment in speaker_segments:
+                excerpt = Segment(start=segment['start'], end=segment['end'])
+                
+                # Transcribe the excerpted segment using Whisper
+                future = executor.submit(asyncio.run, process_file(f, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms, segment=excerpt))
+                futures.append(future)
     
         transcriptions = {}
         for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
@@ -199,25 +190,7 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
                 raise HTTPException(status_code=500, detail=str(e))
     
         logger.info(f"Transcription completed for {len(file)} file(s).")
-
-    # Perform diarization for each file and add to the response
-    diarizations = {}
-    for i, f in enumerate(file, start=1):
-        try:
-            file_path = save_file_locally(f)  # Ensure you have a function to save the file locally
-            diarization = diarize_audio(file_path)
-            diarizations[f"File {i}"] = diarization.get_timeline().support().to_dict()
-        except Exception as e:
-            logger.error(f"An error occurred during diarization: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # Combine transcriptions and diarizations in the response
-    combined_response = {
-        "transcriptions": transcriptions,
-        "diarizations": diarizations
-    }
-
-    return JSONResponse(content=combined_response)
+        return JSONResponse(content=transcriptions)
 
 
 @app.exception_handler(HTTPException)
