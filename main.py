@@ -57,20 +57,21 @@ def convert_to_wav(file_path):
     return file_path
 
 
+from pyannote.audio import Pipeline
+
 def diarize_audio_with_pyannote(audio_file_path):
     """
     Perform speaker diarization on the audio file using pyannote-audio and return speaker-labeled segments.
     """
-    # Load the pre-trained model for speaker segmentation
-    model = Model.from_pretrained("pyannote/segmentation")
-    inference = Inference(model)
+    # Load the speaker diarization pipeline
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
 
-    # Perform inference on the entire file
-    diarization_results = inference(audio_file_path)
+    # Apply the pipeline to the audio file
+    diarization = pipeline(audio_file_path)
 
     # Extract speaker-labeled segments
     speaker_segments = []
-    for turn, _, speaker in diarization_results.itertracks(yield_label=True):
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
         speaker_segments.append({
             'speaker': speaker,
             'start': turn.start,
@@ -78,6 +79,7 @@ def diarize_audio_with_pyannote(audio_file_path):
         })
 
     return speaker_segments
+
 
 
 
@@ -176,7 +178,7 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
             
             # Convert the file to wav if necessary
             file_path = convert_to_wav(file_path)
-            
+
             # Call the new diarization function to get speaker segments
             speaker_segments = diarize_audio_with_pyannote(file_path)
             

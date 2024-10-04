@@ -20,6 +20,7 @@ If you find FastWhisperAPI useful, please consider leaving a star ⭐ or [donate
 
 ## Installation
 You can check out this [YouTube video](https://youtu.be/xu-8hLOAI94?t=176) by [Prompt Engineering](https://www.youtube.com/@engineerprompt), which shows how to install and use the FastWhisperAPI, or follow the instructions below.
+sudo apt install ffmpeg
 
 [![YouTube Video](./images/thumbnail.png)](https://www.youtube.com/watch?v=xu-8hLOAI94&t=176)
 
