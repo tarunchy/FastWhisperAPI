@@ -62,7 +62,7 @@ def initialize_diarization_pipeline():
     
     try:
         diarization_pipeline = Pipeline.from_pretrained(
-            'pyannote/speaker-diarization'
+            'pyannote/segmentation'
         )
         logger.info("Diarization pipeline loaded successfully.")
     except Exception as e:
