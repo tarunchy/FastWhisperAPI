@@ -1,7 +1,8 @@
-
 import concurrent.futures
 import asyncio
 import os
+from pydub import AudioSegment
+from pyannote.audio import Pipeline
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 from faster_whisper import WhisperModel
@@ -35,6 +36,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Diarization pipeline (use pre-trained model)
+diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
+
 # Helper functions
 from utils import authenticate_user
 from utils import process_file, validate_parameters
@@ -66,18 +70,7 @@ def home():
                     <li>vad_filter: Whether to apply a voice activity detection filter. This is an optional parameter. Default is False.</li>
                     <li>min_silence_duration_ms: The minimum duration of silence to be considered as a pause. This is an optional parameter. Default is 1000.</li>
                     <li>response_format: The format of the response. This is an optional parameter. The options are 'text', 'verbose_json'. Default is 'text'.</li>
-                    <li>timestamp_granularities: The granularity of the timestamps. This is an optional parameter. The options are 'segment', 'word'. Default is 'segment'. This is a string and not an array like the OpenAI model, and the timestamps will be returned only if the response_format is set to verbose_json.</li>
-                </ul>
-                <h4>Example:</h4>
-                <ul>
-                    <li>file: audio1.wav, audio2.wav</li>
-                    <li>model: base</li>
-                    <li>language: en</li>
-                    <li>initial_prompt: RoBERTa, Mixtral, Claude 3, Command R+, LLama 3.</li>
-                    <li>vad_filter: False</li>
-                    <li>min_silence_duration_ms: 1000</li>
-                    <li>response_format: text</li>
-                    <li>timestamp_granularities: segment</li>
+                    <li>timestamp_granularities=segment</li>
                 </ul>
                 <h4>Example curl request:</h4>
                 <ul style="list-style-type:none;">
@@ -89,10 +82,9 @@ def home():
                     <li>-F "model=base" \</li>
                     <li>-F "language=en" \</li>
                     <li>-F "initial_prompt=RoBERTa, Mixtral, Claude 3, Command R+, LLama 3." \</li>
-                    <li>-F "vad_filter=False" \</li>
-                    <li>-F "min_silence_duration_ms=1000" \</li>
-                    <li>-F "response_format=text" \</li>
-                    <li>-F "timestamp_granularities=segment"</li>
+                    <li>-F "vad_filter=False"</li>
+                    <li>-F "min_silence_duration_ms=1000"</li>
+                    <li>-F "response_format=text"</li>
                 </ul>
             </li>
             <li>
@@ -102,6 +94,7 @@ def home():
             </li>
         </ul>
     """)
+
 @app.post('/v1/transcriptions',
           responses={
               200: SUCCESSFUL_RESPONSE,
@@ -122,35 +115,92 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
     user = authenticate_user(credentials)
     validate_parameters(file, language, model, vad_filter, min_silence_duration_ms, response_format, timestamp_granularities)
     word_timestamps = timestamp_granularities == "word"
-    m = WhisperModel(model, device=device, compute_type=compute_type)
-    
+    whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
+
+    transcriptions = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = []
-        for f in file:
-            future = executor.submit(asyncio.run, process_file(f, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms))
+        
+        for audio_file in file:
+            file_path = f"./{audio_file.filename}"
+            with open(file_path, "wb") as buffer:
+                buffer.write(await audio_file.read())
+
+            # Diarize the audio and split based on speakers
+            speaker_segments = diarize_audio(file_path)
+            speaker_files = split_audio(file_path, speaker_segments)
+
+            # Transcribe the speaker-labeled segments
+            future = executor.submit(transcribe_segments, speaker_files, whisper_model, language, word_timestamps, vad_filter, min_silence_duration_ms)
             futures.append(future)
-    
-        transcriptions = {}
+
+        # Collect and format the results
         for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
                 result = future.result()
-                if len(file) > 1:
-                    if response_format == "text":
-                        transcriptions[f"File {i}"] = {"text": result["text"]}
-                    else:
-                        transcriptions[f"File {i}"] = result
-                else:
-                    if response_format == "text":
-                        transcriptions = {"text": result["text"]}
-                    else:
-                        transcriptions = result
+                transcriptions[f"File {i}"] = {"text": result}
             except Exception as e:
                 logger.error(f"An error occurred during transcription: {str(e)}")
                 raise HTTPException(status_code=500, detail=str(e))
+
+    logger.info(f"Transcription completed for {len(file)} file(s).")
     
-        logger.info(f"Transcription completed for {len(file)} file(s).")
-        return JSONResponse(content=transcriptions)
+    # Return the formatted transcription JSON response
+    return JSONResponse(content=transcriptions)
+
+# Helper functions
+def diarize_audio(file_path):
+    """
+    Perform speaker diarization on an audio file using pyannote-audio and return speaker-labeled segments.
+    """
+    diarization = diarization_pipeline(file_path)
+    
+    # Extract speaker segments
+    speaker_segments = []
+    for segment in diarization.itertracks(yield_label=True):
+        speaker_segments.append({
+            'speaker': segment[2],  # Speaker label
+            'start': segment[0].start,  # Start time in seconds
+            'end': segment[0].end  # End time in seconds
+        })
+    return speaker_segments
+
+def split_audio(file_path, segments):
+    """
+    Split audio into speaker-labeled segments based on diarization results.
+    """
+    audio = AudioSegment.from_file(file_path)
+    
+    if not os.path.exists('speaker_segments'):
+        os.makedirs('speaker_segments')
+
+    speaker_files = []
+    for i, segment in enumerate(segments):
+        start_ms = segment['start'] * 1000
+        end_ms = segment['end'] * 1000
+        
+        # Extract speaker segment from the audio file
+        speaker_audio = audio[start_ms:end_ms]
+        speaker_file_path = f"speaker_segments/speaker_{segment['speaker']}_{i}.wav"
+        speaker_audio.export(speaker_file_path, format="wav")
+        speaker_files.append((speaker_file_path, segment['speaker']))
+    
+    return speaker_files
+
+def transcribe_segments(speaker_files, model, language, word_timestamps, vad_filter, min_silence_duration_ms):
+    """
+    Transcribe each speaker segment using the Whisper model.
+    """
+    transcriptions = []
+    for speaker_file, speaker in speaker_files:
+        segments, info = model.transcribe(speaker_file, language=language, word_timestamps=word_timestamps, vad_filter=vad_filter, min_silence_duration_ms=min_silence_duration_ms)
+        
+        # Collect transcription text with speaker label
+        for segment in segments:
+            transcriptions.append(f"{speaker}: {segment.text.strip()}")  # Simple chat format
+    
+    return transcriptions
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -158,6 +208,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content=exc.detail,
     )
+
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     status_code = 500
@@ -175,6 +226,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
             }
         },
     )
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     details = exc.errors()[0]['msg']
