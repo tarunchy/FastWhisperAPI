@@ -145,6 +145,8 @@ def home():
             </li>
         </ul>
     """)
+from pydub import AudioSegment
+
 @app.post('/v1/transcriptions',
           responses={
               200: SUCCESSFUL_RESPONSE,
@@ -181,12 +183,22 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
             # Call the new diarization function to get speaker segments
             speaker_segments = diarize_audio_with_pyannote(file_path)
             
-            # Process each speaker segment for transcription
+            # Load the full audio file
+            audio = AudioSegment.from_file(file_path)
+
+            # Process each speaker segment
             for segment in speaker_segments:
-                excerpt = Segment(start=segment['start'], end=segment['end'])
-                
-                # Transcribe the excerpted segment using Whisper
-                future = executor.submit(asyncio.run, process_file(f, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms, segment=excerpt))
+                # Extract the speaker segment from the audio
+                start_ms = segment['start'] * 1000  # Convert seconds to milliseconds
+                end_ms = segment['end'] * 1000
+                speaker_audio = audio[start_ms:end_ms]
+
+                # Export the segment to a temporary file for processing
+                segment_file_path = f"./speaker_{segment['speaker']}_segment.wav"
+                speaker_audio.export(segment_file_path, format="wav")
+
+                # Transcribe the speaker segment
+                future = executor.submit(asyncio.run, process_file(segment_file_path, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms))
                 futures.append(future)
     
         transcriptions = {}
@@ -209,6 +221,7 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
     
         logger.info(f"Transcription completed for {len(file)} file(s).")
         return JSONResponse(content=transcriptions)
+
 
 
 @app.exception_handler(HTTPException)
