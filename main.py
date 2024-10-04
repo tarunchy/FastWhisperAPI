@@ -62,13 +62,14 @@ def initialize_diarization_pipeline():
     
     try:
         diarization_pipeline = Pipeline.from_pretrained(
-            'pyannote/speaker-segmentation',
+            'pyannote/speaker-diarization',  # Corrected pipeline name
             use_auth_token=hf_auth_token
         )
         logger.info("Diarization pipeline loaded successfully.")
     except Exception as e:
         logger.error(f"Failed to load diarization pipeline: {str(e)}")
         raise e
+
 
 
 initialize_diarization_pipeline()
