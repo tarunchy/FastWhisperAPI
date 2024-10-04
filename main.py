@@ -62,7 +62,7 @@ def initialize_diarization_pipeline():
     
     try:
         diarization_pipeline = Pipeline.from_pretrained(
-            'pyannote/speaker-diarization',
+            'pyannote/speaker-segmentation',
             use_auth_token=hf_auth_token
         )
         logger.info("Diarization pipeline loaded successfully.")
