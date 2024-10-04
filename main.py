@@ -39,49 +39,6 @@ app.add_middleware(
 from utils import authenticate_user
 from utils import process_file, validate_parameters
 
-
-from pyannote.audio import Model, Inference
-from pyannote.core import Segment
-
-from pydub import AudioSegment
-
-def convert_to_wav(file_path):
-    """
-    Convert audio file to wav format if it's not already a wav file.
-    """
-    if not file_path.endswith(".wav"):
-        audio = AudioSegment.from_file(file_path)
-        wav_file_path = file_path.replace(".mp3", ".wav")
-        audio.export(wav_file_path, format="wav")
-        return wav_file_path
-    return file_path
-
-
-from pyannote.audio import Pipeline
-# Load the speaker diarization pipeline
-pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
-
-def diarize_audio_with_pyannote(audio_file_path):
-    """
-    Perform speaker diarization on the audio file using pyannote-audio and return speaker-labeled segments.
-    """
-    # Apply the pipeline to the audio file
-    diarization = pipeline(audio_file_path)
-
-    # Extract speaker-labeled segments
-    speaker_segments = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        speaker_segments.append({
-            'speaker': speaker,
-            'start': turn.start,
-            'end': turn.end
-        })
-
-    return speaker_segments
-
-
-
-
 # Routes
 @app.get("/", response_class=RedirectResponse)
 async def redirect_to_docs():
@@ -145,8 +102,6 @@ def home():
             </li>
         </ul>
     """)
-from pydub import AudioSegment
-
 @app.post('/v1/transcriptions',
           responses={
               200: SUCCESSFUL_RESPONSE,
@@ -168,38 +123,13 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
     validate_parameters(file, language, model, vad_filter, min_silence_duration_ms, response_format, timestamp_granularities)
     word_timestamps = timestamp_granularities == "word"
     m = WhisperModel(model, device=device, compute_type=compute_type)
+    
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = []
         for f in file:
-            # Save the file to disk
-            file_path = f"./{f.filename}"
-            with open(file_path, "wb") as buffer:
-                buffer.write(await f.read())
-            
-            # Convert the file to wav if necessary
-            file_path = convert_to_wav(file_path)
-
-            # Call the new diarization function to get speaker segments
-            speaker_segments = diarize_audio_with_pyannote(file_path)
-            
-            # Load the full audio file
-            audio = AudioSegment.from_file(file_path)
-
-            # Process each speaker segment
-            for segment in speaker_segments:
-                # Extract the speaker segment from the audio
-                start_ms = segment['start'] * 1000  # Convert seconds to milliseconds
-                end_ms = segment['end'] * 1000
-                speaker_audio = audio[start_ms:end_ms]
-
-                # Export the segment to a temporary file for processing
-                segment_file_path = f"./speaker_{segment['speaker']}_segment.wav"
-                speaker_audio.export(segment_file_path, format="wav")
-
-                # Transcribe the speaker segment
-                future = executor.submit(asyncio.run, process_file(segment_file_path, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms))
-                futures.append(future)
+            future = executor.submit(asyncio.run, process_file(f, m, initial_prompt, language, word_timestamps, vad_filter, min_silence_duration_ms))
+            futures.append(future)
     
         transcriptions = {}
         for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
@@ -221,8 +151,6 @@ async def transcribe_audio(credentials: HTTPAuthorizationCredentials = Depends(s
     
         logger.info(f"Transcription completed for {len(file)} file(s).")
         return JSONResponse(content=transcriptions)
-
-
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
