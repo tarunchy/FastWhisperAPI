@@ -1,5 +1,6 @@
 fastapi[standard]
 faster_whisper
-torch
-pyannote-audio
+torch==1.10.0+cu102
+pyannote.audio==0.0.1
 pydub
+uvicorn
