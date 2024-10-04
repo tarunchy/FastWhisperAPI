@@ -58,14 +58,13 @@ def convert_to_wav(file_path):
 
 
 from pyannote.audio import Pipeline
+# Load the speaker diarization pipeline
+pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
 
 def diarize_audio_with_pyannote(audio_file_path):
     """
     Perform speaker diarization on the audio file using pyannote-audio and return speaker-labeled segments.
     """
-    # Load the speaker diarization pipeline
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
-
     # Apply the pipeline to the audio file
     diarization = pipeline(audio_file_path)
 
